@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EventEmitter2 } from '@nestjs/event-emitter';
 import { PublicKey } from '@solana/web3.js';
@@ -131,6 +131,21 @@ export class WalletService {
     this.network = this.configService.get<string>('NETWORK', 'ethereum');
   }
 
+  private parsePublicKey(address: string): PublicKey {
+    try {
+      return new PublicKey(address);
+    } catch {
+      throw new BadRequestException(`Invalid Solana address: ${address}`);
+    }
+  }
+
+  private async fetchLiveBalance(address: string): Promise<{ balance: string; symbol: string }> {
+    const pk = this.parsePublicKey(address);
+    const raw = await this.sol.connection.getBalance(pk);
+    const balance = formatBalance(raw, this.sol.decimals);
+    return { balance, symbol: this.sol.symbol };
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // TODO: Implement balance fetching
   //
@@ -154,14 +169,12 @@ export class WalletService {
       return { ...JSON.parse(cached), cached: true };
     }
 
-    const pk = new PublicKey(address);
-    const raw = await this.sol.connection.getBalance(pk);
-    const balance = formatBalance(raw, this.sol.decimals);
+    const { balance, symbol } = await this.fetchLiveBalance(address);
 
     const result: WalletBalance = {
       address,
       balance,
-      symbol: this.sol.symbol,
+      symbol,
       network: this.network,
       cached: false,
     };
@@ -190,7 +203,7 @@ export class WalletService {
       return { ...JSON.parse(cached), cached: true };
     }
 
-    const pk = new PublicKey(address);
+    const pk = this.parsePublicKey(address);
     const signatures = await this.sol.connection.getSignaturesForAddress(pk, { limit });
 
     const transactions = signatures.map((sig) => ({
@@ -251,36 +264,42 @@ export class WalletService {
   // ─────────────────────────────────────────────────────────────────────────
   async getWatchedWallets(): Promise<WatchedWalletWithBalance[]> {
     const all = await this.redis.hgetall(CACHE_KEYS.watchlist);
-    const results: WatchedWalletWithBalance[] = [];
+    const entries = Object.values(all).map((v) => JSON.parse(v));
 
-    for (const [, value] of Object.entries(all)) {
-      const wallet = JSON.parse(value);
-      const { balance, symbol } = await this.getBalance(wallet.address);
-      const previousBalance = await this.redis.get(CACHE_KEYS.lastBalance(wallet.address));
+    const results = await Promise.all(
+      entries.map(async (wallet): Promise<WatchedWalletWithBalance | null> => {
+        try {
+          const { balance, symbol } = await this.fetchLiveBalance(wallet.address);
+          const previousBalance = await this.redis.get(CACHE_KEYS.lastBalance(wallet.address));
 
-      if (previousBalance && hasBalanceChanged(previousBalance, balance)) {
-        this.events.emit(WALLET_BALANCE_CHANGED, {
-          address: wallet.address,
-          network: this.network,
-          symbol,
-          previousBalance,
-          currentBalance: balance,
-          detectedAt: Date.now(),
-        } as WalletBalanceChangedEvent);
-      }
+          if (previousBalance && hasBalanceChanged(previousBalance, balance)) {
+            this.events.emit(WALLET_BALANCE_CHANGED, {
+              address: wallet.address,
+              network: this.network,
+              symbol,
+              previousBalance,
+              currentBalance: balance,
+              detectedAt: Date.now(),
+            } as WalletBalanceChangedEvent);
+          }
 
-      await this.redis.set(CACHE_KEYS.lastBalance(wallet.address), balance);
+          await this.redis.set(CACHE_KEYS.lastBalance(wallet.address), balance);
 
-      results.push({
-        address: wallet.address,
-        label: wallet.label,
-        addedAt: wallet.addedAt,
-        balance,
-        symbol,
-      });
-    }
+          return {
+            address: wallet.address,
+            label: wallet.label,
+            addedAt: wallet.addedAt,
+            balance,
+            symbol,
+          };
+        } catch (err) {
+          this.logger.error(`Failed to fetch balance for ${wallet.address}`, err);
+          return null;
+        }
+      }),
+    );
 
-    return results;
+    return results.filter((r): r is WatchedWalletWithBalance => r !== null);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -340,7 +359,7 @@ export class WalletService {
       contractAddress: item.mint ?? '',
       name: item.name ?? '',
       symbol: item.symbol ?? '',
-      balance: item.amount ?? '0',
+      balance: formatBalance(item.amount ?? '0', item.decimals ?? 0),
       decimals: item.decimals ?? 0,
       network: this.network,
     }));
@@ -385,7 +404,7 @@ export class WalletService {
       return [];
     }
 
-    const owner = new PublicKey(address);
+    const owner = this.parsePublicKey(address);
     const nfts = await this.metaplex.sdk.nfts().findAllByOwner({ owner });
 
     const items: NftItem[] = nfts.map((nft: any) => ({
