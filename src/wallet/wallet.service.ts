@@ -131,16 +131,8 @@ export class WalletService {
     this.network = this.configService.get<string>("NETWORK", "ethereum");
   }
 
-  private parsePublicKey(address: string): PublicKey {
-    try {
-      return new PublicKey(address);
-    } catch {
-      throw new BadRequestException(`Invalid Solana address: ${address}`);
-    }
-  }
-
   private async fetchBalance(address: string): Promise<string> {
-    const pk = this.parsePublicKey(address);
+    const pk = new PublicKey(address);
     const raw = await this.sol.connection.getBalance(pk);
     const balance = formatBalance(raw, this.sol.decimals);
     return balance;
@@ -203,7 +195,7 @@ export class WalletService {
       return { ...JSON.parse(cached), cached: true };
     }
 
-    const pk = this.parsePublicKey(address);
+    const pk = new PublicKey(address);
     const signatures = await this.sol.connection.getSignaturesForAddress(pk, {
       limit,
     });
@@ -420,7 +412,7 @@ export class WalletService {
       return [];
     }
 
-    const owner = this.parsePublicKey(address);
+    const owner = new PublicKey(address);
     const nfts = await this.metaplex.sdk.nfts().findAllByOwner({ owner });
 
     const items: NftItem[] = nfts.map((nft: any) => ({
