@@ -1,15 +1,15 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { EventEmitter2 } from '@nestjs/event-emitter';
-import { PublicKey } from '@solana/web3.js';
-import { RedisService } from '../redis/redis.service';
-import { EvmProvider } from '../blockchain/providers/evm.provider';
-import { SolanaProvider } from '../blockchain/providers/solana.provider';
-import { Web3Provider } from '../blockchain/providers/web3.provider';
-import { TonProvider } from '../blockchain/providers/ton.provider';
-import { MoralisProvider } from '../blockchain/providers/moralis.provider';
-import { MetaplexProvider } from '../blockchain/providers/metaplex.provider';
-import { WatchWalletDto } from './dto/watch-wallet.dto';
+import { Injectable, Logger, BadRequestException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { EventEmitter2 } from "@nestjs/event-emitter";
+import { PublicKey } from "@solana/web3.js";
+import { RedisService } from "../redis/redis.service";
+import { EvmProvider } from "../blockchain/providers/evm.provider";
+import { SolanaProvider } from "../blockchain/providers/solana.provider";
+import { Web3Provider } from "../blockchain/providers/web3.provider";
+import { TonProvider } from "../blockchain/providers/ton.provider";
+import { MoralisProvider } from "../blockchain/providers/moralis.provider";
+import { MetaplexProvider } from "../blockchain/providers/metaplex.provider";
+import { WatchWalletDto } from "./dto/watch-wallet.dto";
 import {
   WalletBalance,
   TransactionList,
@@ -17,12 +17,12 @@ import {
   BalanceAlert,
   TokenBalance,
   NftItem,
-} from '../blockchain/types/blockchain.types';
+} from "../blockchain/types/blockchain.types";
 import {
   WALLET_BALANCE_CHANGED,
   WalletBalanceChangedEvent,
-} from './events/wallet-balance-changed.event';
-import { formatBalance, hasBalanceChanged } from '../utils/decimal.utils';
+} from "./events/wallet-balance-changed.event";
+import { formatBalance, hasBalanceChanged } from "../utils/decimal.utils";
 
 // ─── Library reference ────────────────────────────────────────────────────────
 //
@@ -101,15 +101,15 @@ const CACHE_KEYS = {
   tokens: (address: string) => `tokens:${address}`,
   nfts: (address: string) => `nfts:${address}`,
   lastBalance: (address: string) => `last_balance:${address}`,
-  watchlist: 'watchlist',
-  alerts: 'wallet:alerts',
+  watchlist: "watchlist",
+  alerts: "wallet:alerts",
 };
 
 const CACHE_TTL = {
-  balance: 30,      // seconds
+  balance: 30, // seconds
   transactions: 60, // seconds
-  tokens: 120,      // seconds
-  nfts: 300,        // seconds
+  tokens: 120, // seconds
+  nfts: 300, // seconds
 };
 
 @Injectable()
@@ -128,7 +128,7 @@ export class WalletService {
     private readonly configService: ConfigService,
     private readonly events: EventEmitter2,
   ) {
-    this.network = this.configService.get<string>('NETWORK', 'ethereum');
+    this.network = this.configService.get<string>("NETWORK", "ethereum");
   }
 
   private parsePublicKey(address: string): PublicKey {
@@ -139,11 +139,11 @@ export class WalletService {
     }
   }
 
-  private async fetchLiveBalance(address: string): Promise<{ balance: string; symbol: string }> {
+  private async fetchBalance(address: string): Promise<string> {
     const pk = this.parsePublicKey(address);
     const raw = await this.sol.connection.getBalance(pk);
     const balance = formatBalance(raw, this.sol.decimals);
-    return { balance, symbol: this.sol.symbol };
+    return balance;
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -169,12 +169,12 @@ export class WalletService {
       return { ...JSON.parse(cached), cached: true };
     }
 
-    const { balance, symbol } = await this.fetchLiveBalance(address);
+    const balance = await this.fetchBalance(address);
 
     const result: WalletBalance = {
       address,
       balance,
-      symbol,
+      symbol: this.sol.symbol,
       network: this.network,
       cached: false,
     };
@@ -204,15 +204,17 @@ export class WalletService {
     }
 
     const pk = this.parsePublicKey(address);
-    const signatures = await this.sol.connection.getSignaturesForAddress(pk, { limit });
+    const signatures = await this.sol.connection.getSignaturesForAddress(pk, {
+      limit,
+    });
 
     const transactions = signatures.map((sig) => ({
       hash: sig.signature,
       from: address,
-      to: '',
-      value: '0.000000',
+      to: "",
+      value: "0.000000",
       timestamp: sig.blockTime ?? 0,
-      status: sig.err ? 'failed' as const : 'success' as const,
+      status: sig.err ? ("failed" as const) : ("success" as const),
     }));
 
     const result: TransactionList = {
@@ -235,11 +237,17 @@ export class WalletService {
   //
   // Return: { success: true, address: dto.address }
   // ─────────────────────────────────────────────────────────────────────────
-  async watchWallet(dto: WatchWalletDto): Promise<{ success: boolean; address: string }> {
+  async watchWallet(
+    dto: WatchWalletDto,
+  ): Promise<{ success: boolean; address: string }> {
     await this.redis.hset(
       CACHE_KEYS.watchlist,
       dto.address,
-      JSON.stringify({ address: dto.address, label: dto.label, addedAt: Date.now() }),
+      JSON.stringify({
+        address: dto.address,
+        label: dto.label,
+        addedAt: Date.now(),
+      }),
     );
 
     return { success: true, address: dto.address };
@@ -265,12 +273,15 @@ export class WalletService {
   async getWatchedWallets(): Promise<WatchedWalletWithBalance[]> {
     const all = await this.redis.hgetall(CACHE_KEYS.watchlist);
     const entries = Object.values(all).map((v) => JSON.parse(v));
+    const symbol = this.sol.symbol;
 
     const results = await Promise.all(
       entries.map(async (wallet): Promise<WatchedWalletWithBalance | null> => {
         try {
-          const { balance, symbol } = await this.fetchLiveBalance(wallet.address);
-          const previousBalance = await this.redis.get(CACHE_KEYS.lastBalance(wallet.address));
+          const balance = await this.fetchBalance(wallet.address);
+          const previousBalance = await this.redis.get(
+            CACHE_KEYS.lastBalance(wallet.address),
+          );
 
           if (previousBalance && hasBalanceChanged(previousBalance, balance)) {
             this.events.emit(WALLET_BALANCE_CHANGED, {
@@ -293,7 +304,10 @@ export class WalletService {
             symbol,
           };
         } catch (err) {
-          this.logger.error(`Failed to fetch balance for ${wallet.address}`, err);
+          this.logger.error(
+            `Failed to fetch balance for ${wallet.address}`,
+            err,
+          );
           return null;
         }
       }),
@@ -346,20 +360,22 @@ export class WalletService {
     }
 
     if (!this.moralis.isAvailable()) {
-      this.logger.warn('Moralis is not configured — cannot fetch token balances');
+      this.logger.warn(
+        "Moralis is not configured — cannot fetch token balances",
+      );
       return [];
     }
 
     const res = await this.moralis.sdk.SolApi.account.getSPL({
       address,
-      network: 'mainnet',
+      network: "mainnet",
     });
 
     const tokens: TokenBalance[] = (res as any).result.map((item: any) => ({
-      contractAddress: item.mint ?? '',
-      name: item.name ?? '',
-      symbol: item.symbol ?? '',
-      balance: formatBalance(item.amount ?? '0', item.decimals ?? 0),
+      contractAddress: item.mint ?? "",
+      name: item.name ?? "",
+      symbol: item.symbol ?? "",
+      balance: formatBalance(item.amount ?? "0", item.decimals ?? 0),
       decimals: item.decimals ?? 0,
       network: this.network,
     }));
@@ -400,7 +416,7 @@ export class WalletService {
     }
 
     if (!this.metaplex.isAvailable()) {
-      this.logger.warn('Metaplex is not configured — cannot fetch NFTs');
+      this.logger.warn("Metaplex is not configured — cannot fetch NFTs");
       return [];
     }
 
@@ -408,9 +424,9 @@ export class WalletService {
     const nfts = await this.metaplex.sdk.nfts().findAllByOwner({ owner });
 
     const items: NftItem[] = nfts.map((nft: any) => ({
-      mint: nft.mintAddress?.toBase58() ?? '',
-      name: nft.name ?? '',
-      symbol: nft.symbol ?? '',
+      mint: nft.mintAddress?.toBase58() ?? "",
+      name: nft.name ?? "",
+      symbol: nft.symbol ?? "",
       network: this.network,
     }));
 
